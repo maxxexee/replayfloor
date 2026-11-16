@@ -3,8 +3,10 @@
 A one-binary tool for a single question about Helius LaserStream: how much
 history can you actually replay before the stream tells you the slot is gone?
 
-Measured on devnet: **864,149 slots**, and the floor is real, not just
-reported. That is 288 times the documented 3000.
+Measured on devnet: **864,149 slots**, verified by asking for them rather than
+trusting the server's claim. That is 288 times the documented 3000 slots, the
+safe direction to be wrong in, and still worth knowing before you plan around
+20 minutes of history.
 
 ## Result: one hour on devnet, 16 November 2026
 
@@ -28,9 +30,14 @@ failed polls. Raw JSONL kept locally, not in this repository.
 
 The replay buffer holds 864,167 slots at the median, 288 times the documented
 3000. At the 4.18 slots per second this endpoint actually produced, that is
-3447 minutes, about 57 hours of chain history. The documented 20 minutes comes
-from applying 2.5 slots per second to 3000 slots, so the wrong part is the slot
-count, not the arithmetic.
+3447 minutes, about 57 hours of chain history. The 20 minutes is what 3000
+slots buys at a nominal 2.5 slots per second.
+
+One reading this does not settle: the documentation may be stating a guaranteed
+minimum rather than describing the buffer. A 3000 slot guarantee is fully
+compatible with eight hundred thousand slots of actual retention, and this
+evidence does not show the service breaking its documentation. What it shows is
+that planning around 20 minutes leaves a lot of history on the table.
 
 The depth moved by 14 slots across the hour while the head advanced 15,041, and
 `firstAvailable` advanced 15,027. That is a fixed window: the floor stays a
@@ -157,6 +164,10 @@ documented 3000. The limits below apply before generalising that to mainnet.
   its latency and why the retry exists.
 - Retention may be tier dependent. A Business or Professional key could see a
   different buffer than a free one.
+- Nothing here establishes that the documented 3000 slots is wrong as a
+  guarantee. An observed window larger than a stated minimum is expected
+  behaviour, and this measurement says nothing about whether the minimum is
+  honoured when the buffer is under pressure.
 
 ## License
 
