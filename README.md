@@ -50,18 +50,18 @@ not settle it; the depth being 288 times the documented figure does.
 The number above comes from the server's own `firstAvailable`. A server can
 claim a floor it will not honour, so `floor` asks for old slots directly and
 watches where the stream actually starts. It grows the request 1.5x while slots
-serve, then bisects until the served and refused ages are 50 slots apart.
+serve, then bisects until the served and refused ages are within 50 slots of
+each other. The run below closed the gap to 35.
 
 | | |
 |---|---|
-| endpoint | https://laserstream-devnet-ewr.helius-rpc.com |
 | head at start | 523058130 |
 | claimed floor | 522193975 |
 | claimed depth | 864155 slots |
 | verified depth | 864149 slots (largest age served exactly) |
 | first failing age | 864184 slots (refused or silent) |
-| resolution | 50 slots (bisection tolerance) |
-| verdict | claim holds within the 50 slot resolution of the search |
+| resolution | 35 slots (bisection tolerance) |
+| verdict | claim holds within the 35 slot resolution of the search |
 | attempts | 25 (0 silent, 0 clamped) |
 | attempt latency | 234 / 459 / 3806 ms (min / median / max) |
 
@@ -132,8 +132,20 @@ cargo run --release -- floor --tolerance 50 --out floor.jsonl
 
 `--endpoint` takes a full URL or a bare region name such as `mainnet-ewr`.
 `--interval-secs` defaults to 60. `--tolerance` is how close the bisection gets
-before it stops; 50 slots is about 12 seconds of devnet chain time. `report`
-accepts any file the probe wrote, including one that was interrupted.
+before it stops; 50 slots is about 12 seconds of devnet chain time.
+
+## Check the numbers without a key
+
+The recorded runs are in `fixtures/`, so both tables above rebuild from a clean
+checkout with no credentials and no network:
+
+```bash
+cargo run --release -- report fixtures/devnet-1h.jsonl          # retention table
+cargo run --release -- report --attempts fixtures/floor.jsonl   # floor table
+```
+
+`report` accepts any file either subcommand wrote, including one that was
+interrupted, so you can diff your own run against the committed one.
 
 ## How to read the result
 

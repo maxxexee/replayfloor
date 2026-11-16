@@ -56,7 +56,7 @@ pub fn append<T: Serialize>(path: &Path, record: &T) -> Result<()> {
 
 /// Reads a JSONL file back. Blank lines are skipped, malformed lines are an
 /// error naming the line number.
-pub fn read_all(path: &Path) -> Result<Vec<Sample>> {
+pub fn read_all<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let mut out = Vec::new();
@@ -65,7 +65,7 @@ pub fn read_all(path: &Path) -> Result<Vec<Sample>> {
         if line.is_empty() {
             continue;
         }
-        let sample: Sample = serde_json::from_str(line)
+        let sample: T = serde_json::from_str(line)
             .with_context(|| format!("{} line {}", path.display(), i + 1))?;
         out.push(sample);
     }
@@ -115,7 +115,7 @@ mod tests {
         append(&path, &a).unwrap();
         append(&path, &b).unwrap();
 
-        let back = read_all(&path).unwrap();
+        let back: Vec<Sample> = read_all(&path).unwrap();
         assert_eq!(back, vec![a, b]);
         std::fs::remove_dir_all(&dir).ok();
     }

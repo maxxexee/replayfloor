@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -18,7 +18,7 @@ use crate::sample;
 /// means data arrived but from a later slot, which is how a server hides a
 /// missed floor: something always arrives, so a probe that only checks for data
 /// never notices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
     Served,
@@ -35,7 +35,7 @@ impl Verdict {
 }
 
 /// One attempt at a given age, written to the JSONL file as it happens.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attempt {
     pub ts_ms: i64,
     pub from_slot: u64,
@@ -314,12 +314,11 @@ pub async fn run(args: FloorArgs) -> Result<()> {
     println!(
         "{}",
         summary(
-            &args,
             head,
-            claimed,
             served,
             boundary.failed(),
             stopped,
+            args.tolerance,
             &rows
         )
     );
@@ -337,13 +336,37 @@ fn median(values: &[u64]) -> u64 {
     }
 }
 
+/// Rebuilds the table from a recorded attempts file, so the evidence in
+/// `fixtures/` can be checked without an API key or a network.
+///
+/// The head is fixed for a run, so it comes from `from_slot + age`. The
+/// resolution is the gap the search stopped at, which is exactly how the live
+/// run computed it.
+pub fn from_attempts(rows: &[Attempt]) -> Result<String> {
+    let first = rows.first().context("no attempts in this file")?;
+    let head = first.from_slot + first.age;
+    let served = rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::Served)
+        .map(|r| r.age)
+        .max()
+        .context("no attempt in this file was served, so there is no floor")?;
+    let failed = rows
+        .iter()
+        .filter(|r| r.verdict.failed())
+        .map(|r| r.age)
+        .min();
+    let tolerance = failed.map(|f| f.saturating_sub(served)).unwrap_or(0);
+
+    Ok(summary(head, served, failed, None, tolerance, rows))
+}
+
 fn summary(
-    args: &FloorArgs,
     head: u64,
-    first_claim: Option<u64>,
     served: u64,
     failed: Option<u64>,
     stopped: Option<String>,
+    tolerance: u64,
     rows: &[Attempt],
 ) -> String {
     let min = |v: &[u64]| v.iter().copied().min().unwrap_or(0);
@@ -351,28 +374,32 @@ fn summary(
     // The claim moves as the endpoint purges, so the comparison uses the last
     // reading taken next to an attempt rather than the one from the start.
     let latest_claim = rows.iter().rev().find_map(|r| r.claimed_floor);
+    // What the search actually achieved, which is never wider than the tolerance
+    // it was asked for.
+    let tolerance = failed
+        .map(|f| f.saturating_sub(served))
+        .unwrap_or(tolerance);
     let claimed_age = latest_claim.map(|c| head.saturating_sub(c));
     let verdict = match (&stopped, claimed_age, failed) {
         (Some(reason), _, _) => format!("inconclusive: {reason}"),
-        (None, Some(claim), Some(fail)) if claim > fail && claim - fail > args.tolerance => {
+        (None, Some(claim), Some(fail)) if claim > fail && claim - fail > tolerance => {
             format!(
                 "claim is optimistic by {} slots: the stream stops serving before firstAvailable",
                 claim - fail
             )
         }
-        (None, Some(claim), Some(_)) if claim < served && served - claim > args.tolerance => {
+        (None, Some(claim), Some(_)) if claim < served && served - claim > tolerance => {
             format!("claim is conservative by {} slots", served - claim)
         }
-        (None, Some(_), Some(_)) => format!(
-            "claim holds within the {} slot resolution of the search",
-            args.tolerance
-        ),
+        (None, Some(_), Some(_)) => {
+            format!("claim holds within the {tolerance} slot resolution of the search")
+        }
         (None, Some(_), None) => "the stream was still serving at the age cap".to_string(),
         (None, None, _) => {
             "endpoint reports no floor, so only the served range is known".to_string()
         }
     };
-    let resolution = format!("{} slots (bisection tolerance)", args.tolerance);
+    let resolution = format!("{tolerance} slots (bisection tolerance)");
 
     let silent = rows.iter().filter(|r| r.verdict == Verdict::Silent).count();
     let clamped = rows
@@ -384,7 +411,6 @@ fn summary(
 
     format!(
         "| | |\n|---|---|\n\
-         | endpoint | {} |\n\
          | head at start | {head} |\n\
          | claimed floor | {} |\n\
          | claimed depth | {} slots |\n\
@@ -394,8 +420,7 @@ fn summary(
          | verdict | {verdict} |\n\
          | attempts | {} ({} silent, {} clamped) |\n\
          | attempt latency | {} / {} / {} ms (min / median / max) |\n",
-        args.endpoint,
-        first_claim
+        latest_claim
             .map(|c| c.to_string())
             .unwrap_or_else(|| "none".to_string()),
         claimed_age
@@ -476,6 +501,38 @@ mod tests {
         assert_eq!(b.next(), Some(500));
         b.record(500, Verdict::Served);
         assert_eq!(b.next(), Some(750));
+    }
+
+    fn attempt(age: u64, verdict: Verdict) -> Attempt {
+        Attempt {
+            ts_ms: 0,
+            from_slot: 1_000 - age,
+            age,
+            verdict,
+            first_slot: None,
+            claimed_floor: Some(100),
+            ms: 10,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_recorded_run_rebuilds_the_same_table() {
+        let rows = vec![
+            attempt(500, Verdict::Served),
+            attempt(900, Verdict::Served),
+            attempt(950, Verdict::OutOfRange),
+        ];
+        let table = from_attempts(&rows).unwrap();
+        assert!(table.contains("| head at start | 1000 |"), "{table}");
+        assert!(table.contains("| verified depth | 900 slots"), "{table}");
+        assert!(table.contains("| resolution | 50 slots"), "{table}");
+    }
+
+    #[test]
+    fn a_run_with_no_served_attempt_is_not_a_measurement() {
+        let rows = vec![attempt(900, Verdict::Silent)];
+        assert!(from_attempts(&rows).is_err());
     }
 
     #[test]

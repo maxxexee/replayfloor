@@ -40,7 +40,7 @@ enum Command {
     Probe(ProbeCli),
     /// Ask the endpoint for progressively older slots and find the true floor
     Floor(FloorCli),
-    /// Summarise a JSONL file written by probe
+    /// Summarise a JSONL file written by probe or floor
     Report(ReportCli),
 }
 
@@ -156,8 +156,12 @@ impl FloorCli {
 
 #[derive(Parser)]
 struct ReportCli {
-    /// JSONL file written by probe
+    /// JSONL file written by probe or floor
     file: PathBuf,
+
+    /// Read the file as floor attempts instead of probe samples
+    #[arg(long)]
+    attempts: bool,
 }
 
 #[tokio::main]
@@ -182,10 +186,16 @@ async fn main() -> Result<()> {
         }
         Command::Floor(args) => floor::run(args.into_args()?).await,
         Command::Report(args) => {
-            let samples = sample::read_all(&args.file)
-                .with_context(|| format!("reading {}", args.file.display()))?;
-            let summary = stats::summarize(&samples);
-            print!("{}", report::markdown(&summary));
+            if args.attempts {
+                let rows: Vec<floor::Attempt> = sample::read_all(&args.file)
+                    .with_context(|| format!("reading {}", args.file.display()))?;
+                print!("{}", floor::from_attempts(&rows)?);
+            } else {
+                let samples: Vec<sample::Sample> = sample::read_all(&args.file)
+                    .with_context(|| format!("reading {}", args.file.display()))?;
+                let summary = stats::summarize(&samples);
+                print!("{}", report::markdown(&summary));
+            }
             Ok(())
         }
     }

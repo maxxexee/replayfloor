@@ -1,4 +1,6 @@
 /target
 *.jsonl
+# The recorded runs are the evidence, so they are committed on purpose.
+!fixtures/*.jsonl
 .env
 *.log
