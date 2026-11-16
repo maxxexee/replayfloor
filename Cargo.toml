@@ -1,0 +1,23 @@
+[package]
+name = "replayfloor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Measures how much LaserStream replay actually retains, instead of trusting the documented window"
+license = "MIT"
+repository = "https://github.com/maxxexee/replayfloor"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "signal", "time", "fs"] }
+# Needed to reach an https endpoint: the client crate leaves TLS to the caller.
+tonic = { version = "0.14", default-features = false, features = ["channel", "transport", "tls-ring", "tls-webpki-roots"] }
+yellowstone-grpc-client = "17.0"
+yellowstone-grpc-proto = "14.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
