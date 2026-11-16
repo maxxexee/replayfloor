@@ -199,9 +199,8 @@ documented 3000. The limits below apply before generalising that to mainnet.
   not guaranteed to match mainnet.
 - One region, one hour. A single hour shows the depth is stable, not that it
   stays stable across a validator restart or a purge cycle longer than the run.
-- `floor` checks the reported floor against what the stream serves, but only
-  for slots. It does not prove that transactions, blocks or account writes
-  survive to the same depth; those filters can have their own limits.
+- Transaction depth was measured separately and matched slot depth. Accounts
+  and blocks were not tested and could have their own limits.
 - `floor` treats five seconds of silence at a given age as a refusal. A stream
   that was merely slow would look the same, which is why every attempt records
   its latency and why the retry exists.
@@ -211,6 +210,25 @@ documented 3000. The limits below apply before generalising that to mainnet.
   guarantee. An observed window larger than a stated minimum is expected
   behaviour, and this measurement says nothing about whether the minimum is
   honoured when the buffer is under pressure.
+
+## Where this stops
+
+The rule was written before the last measurement: if transaction depth matches
+slot depth, this repository is finished and the next hour goes to something with
+users.
+
+It matched, 864,043 slots against 864,149, so it is finished. That means:
+
+- No account or block subscriptions. Same question one data type over, and the
+  answer is unlikely to change what anyone builds.
+- No dashboard, alerting, or deployment. A table and a bisection were the whole
+  job.
+- No mainnet. It needs a paid plan, and paying to re-measure a number the docs
+  already state is not worth it.
+
+Two things would reopen this: evidence that mainnet refuses transactions the
+slot window still serves, or a change to the documented window. Both are new
+facts, not polish.
 
 ## License
 
