@@ -7,10 +7,36 @@ use std::time::{Duration, Instant};
 use yellowstone_grpc_client::{GeyserGrpcClient, GeyserGrpcClientError, GeyserStream};
 use yellowstone_grpc_proto::prelude::{
     subscribe_update::UpdateOneof, CommitmentLevel, SubscribeRequest, SubscribeRequestFilterSlots,
+    SubscribeRequestFilterTransactions,
 };
 
 use crate::probe::{self, CALL_TIMEOUT};
 use crate::sample;
+
+/// What the subscription asked for. Depth is measured per data type because the
+/// answer is only useful if it matches how you build: nobody resumes on slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Filter {
+    #[default]
+    Slots,
+    Transactions,
+}
+
+/// Present in every transaction, so it stands in for "any transaction" without
+/// picking a single app's traffic.
+const COMPUTE_BUDGET: &str = "ComputeBudget111111111111111111111111111111";
+
+impl std::fmt::Display for Filter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Filter::Slots => write!(f, "slots"),
+            Filter::Transactions => {
+                write!(f, "transactions touching {COMPUTE_BUDGET}")
+            }
+        }
+    }
+}
 
 /// What one replay attempt found.
 ///
@@ -48,6 +74,10 @@ pub struct Attempt {
     pub claimed_floor: Option<u64>,
     pub ms: u64,
     pub error: Option<String>,
+    /// Absent in files written before this field existed, which were all slot
+    /// subscriptions.
+    #[serde(default)]
+    pub filter: Filter,
 }
 
 /// Narrows the oldest servable age. Pure: no network, no clock, so the search
@@ -131,6 +161,7 @@ pub struct FloorArgs {
     /// Retries for a transient transport failure. A network blip must never be
     /// recorded as the bottom of the replay window.
     pub retries: usize,
+    pub filter: Filter,
 }
 
 /// Asks for `from_slot` and reports where the stream actually starts.
@@ -140,23 +171,45 @@ async fn attempt(
     age: u64,
     wait: Duration,
     clamp_tolerance: u64,
+    filter: Filter,
 ) -> Attempt {
     let from_slot = head.saturating_sub(age);
     let started = Instant::now();
 
-    let mut slots = HashMap::new();
-    slots.insert(
-        "any".to_string(),
-        SubscribeRequestFilterSlots {
-            filter_by_commitment: Some(false),
-            interslot_updates: Some(false),
-        },
-    );
-    let request = SubscribeRequest {
-        slots,
+    let mut request = SubscribeRequest {
         from_slot: Some(from_slot),
         ..Default::default()
     };
+    match filter {
+        Filter::Slots => {
+            let mut slots = HashMap::new();
+            slots.insert(
+                "any".to_string(),
+                SubscribeRequestFilterSlots {
+                    filter_by_commitment: Some(false),
+                    interslot_updates: Some(false),
+                },
+            );
+            request.slots = slots;
+        }
+        Filter::Transactions => {
+            let mut transactions = HashMap::new();
+            transactions.insert(
+                "any".to_string(),
+                SubscribeRequestFilterTransactions {
+                    // Every transaction carries the compute budget program, so
+                    // this matches ordinary traffic without picking one app.
+                    // Vote-only filters returned nothing at all on devnet, and
+                    // so did an empty filter, so the server needs an account
+                    // here to know what to stream.
+                    account_include: vec![COMPUTE_BUDGET.to_string()],
+                    vote: Some(false),
+                    ..Default::default()
+                },
+            );
+            request.transactions = transactions;
+        }
+    }
 
     let (verdict, first_slot, error) = match client.subscribe_once(request).await {
         Err(e) => classify_error(e),
@@ -178,6 +231,7 @@ async fn attempt(
         claimed_floor,
         ms: started.elapsed().as_millis() as u64,
         error,
+        filter,
     }
 }
 
@@ -198,17 +252,33 @@ async fn read_first(
             }
             Ok(Some(Ok(update))) => match update.update_oneof {
                 Some(UpdateOneof::Slot(slot)) => {
-                    let verdict = if slot.slot > from_slot + clamp_tolerance {
-                        Verdict::Clamped
-                    } else {
-                        Verdict::Served
-                    };
-                    return (verdict, Some(slot.slot), None);
+                    return (
+                        served_at(slot.slot, from_slot, clamp_tolerance),
+                        Some(slot.slot),
+                        None,
+                    )
+                }
+                Some(UpdateOneof::Transaction(tx)) => {
+                    return (
+                        served_at(tx.slot, from_slot, clamp_tolerance),
+                        Some(tx.slot),
+                        None,
+                    )
                 }
                 // Pings and anything the filter did not ask for are ignored.
                 _ => continue,
             },
         }
+    }
+}
+
+/// The first delivery decides: at the requested slot means the resume worked,
+/// later means the server moved the start point without saying so.
+fn served_at(slot: u64, from_slot: u64, clamp_tolerance: u64) -> Verdict {
+    if slot > from_slot + clamp_tolerance {
+        Verdict::Clamped
+    } else {
+        Verdict::Served
     }
 }
 
@@ -264,7 +334,15 @@ pub async fn run(args: FloorArgs) -> Result<()> {
         }
         attempts += 1;
 
-        let mut row = attempt(&mut client, head, age, args.wait, args.clamp_tolerance).await;
+        let mut row = attempt(
+            &mut client,
+            head,
+            age,
+            args.wait,
+            args.clamp_tolerance,
+            args.filter,
+        )
+        .await;
         for retry in 0..args.retries {
             let transient = matches!(row.verdict, Verdict::Failed)
                 || (matches!(row.verdict, Verdict::Silent) && retry == 0);
@@ -276,7 +354,15 @@ pub async fn run(args: FloorArgs) -> Result<()> {
                 // retry on the same one would fail the same way.
                 client = probe::connect(&args.endpoint, &args.api_key).await?;
             }
-            row = attempt(&mut client, head, age, args.wait, args.clamp_tolerance).await;
+            row = attempt(
+                &mut client,
+                head,
+                age,
+                args.wait,
+                args.clamp_tolerance,
+                args.filter,
+            )
+            .await;
         }
 
         println!(
@@ -373,6 +459,7 @@ fn summary(
 
     // The claim moves as the endpoint purges, so the comparison uses the last
     // reading taken next to an attempt rather than the one from the start.
+    let filter = rows.first().map(|r| r.filter).unwrap_or_default();
     let latest_claim = rows.iter().rev().find_map(|r| r.claimed_floor);
     // What the search actually achieved, which is never wider than the tolerance
     // it was asked for.
@@ -411,6 +498,7 @@ fn summary(
 
     format!(
         "| | |\n|---|---|\n\
+         | filter | {filter} |\n\
          | head at start | {head} |\n\
          | claimed floor | {} |\n\
          | claimed depth | {} slots |\n\
@@ -513,6 +601,7 @@ mod tests {
             claimed_floor: Some(100),
             ms: 10,
             error: None,
+            filter: Filter::Slots,
         }
     }
 
@@ -527,6 +616,15 @@ mod tests {
         assert!(table.contains("| head at start | 1000 |"), "{table}");
         assert!(table.contains("| verified depth | 900 slots"), "{table}");
         assert!(table.contains("| resolution | 50 slots"), "{table}");
+    }
+
+    #[test]
+    fn an_attempt_written_before_the_filter_field_still_reads() {
+        // Files recorded before transactions were measured have no filter key,
+        // and they were all slot subscriptions.
+        let line = r#"{"ts_ms":1,"from_slot":10,"age":5,"verdict":"served","first_slot":10,"claimed_floor":null,"ms":3,"error":null}"#;
+        let row: Attempt = serde_json::from_str(line).unwrap();
+        assert_eq!(row.filter, Filter::Slots);
     }
 
     #[test]

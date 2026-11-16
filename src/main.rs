@@ -127,6 +127,10 @@ struct FloorCli {
     /// Retries for a transient transport failure before calling the run inconclusive
     #[arg(long, default_value_t = 3)]
     retries: usize,
+
+    /// What to subscribe for. Transaction depth need not match slot depth
+    #[arg(long, default_value = "slots", value_parser = ["slots", "transactions"])]
+    filter: String,
 }
 
 impl FloorCli {
@@ -140,6 +144,11 @@ impl FloorCli {
         if self.tolerance == 0 {
             bail!("--tolerance must be at least 1 slot, or the search cannot stop");
         }
+        let filter = if self.filter == "transactions" {
+            floor::Filter::Transactions
+        } else {
+            floor::Filter::Slots
+        };
         Ok(floor::FloorArgs {
             endpoint: resolve_endpoint(&self.endpoint),
             api_key,
@@ -150,6 +159,7 @@ impl FloorCli {
             clamp_tolerance: self.clamp_tolerance,
             max_attempts: self.max_attempts,
             retries: self.retries,
+            filter,
         })
     }
 }

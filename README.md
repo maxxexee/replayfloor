@@ -81,14 +81,44 @@ the search had recorded as the boundary. Retries on a fresh connection, and an
 abort when transport keeps failing, are why the second run is trustworthy. A
 network error must never be allowed to look like the end of the replay window.
 
+## Transactions replay as deep as slots
+
+Depth in slots is the wrong unit if you resume on transactions. Same endpoint,
+same day, same bisection, only the filter changed to transactions touching
+`ComputeBudget111111111111111111111111111111`, which every transaction carries:
+
+| | |
+|---|---|
+| filter | transactions touching ComputeBudget111111111111111111111111111111 |
+| head at start | 523072162 |
+| claimed floor | 522208101 |
+| claimed depth | 864061 slots |
+| verified depth | 864043 slots (largest age served exactly) |
+| first failing age | 864078 slots (refused) |
+| resolution | 35 slots (bisection tolerance) |
+| attempts | 25 (0 silent, 0 clamped) |
+
+The two depths are 106 slots apart and both land on the reported floor inside
+the 35 slot resolution, so transaction replay does not stop earlier than slot
+replay. The trap that would have mattered, resuming slots at 48 hours back and
+then finding transactions cut off at 30,000, is not present here.
+
+A failed attempt at this costs one warning: a transaction filter with only
+`vote: true` delivered nothing at all, and reported `Silent` at 39 slots back,
+which looks exactly like a shallow buffer. The endpoint needs an account to
+match on. That is why the run above names a program instead of relying on the
+vote flag, and it is why a silent result is worth a second look before it is
+written down.
+
 ## The open question
 
-The LaserStream documentation says the replay buffer holds 3000 slots, about
-20 minutes of chain history. While writing the gap recovery example in
+The LaserStream SDK README lists replay as up to 3000 slots, about 20 minutes of
+chain history, while the documentation page for historical replay says 48 hours.
+The same README line is what started this. While writing the gap recovery example in
 [helius-starter-kit](https://github.com/maxxexee/helius-starter-kit) I noticed
 `firstAvailable` sitting roughly 864,000 slots behind the head, which is closer
-to 48 hours than to 20 minutes at 2.5 slots per second. Two numbers cannot both
-be right.
+to 48 hours than to 20 minutes at 2.5 slots per second. That is the docs page
+being right and the SDK README being stale, not a defect in the service.
 
 That example stopped at the observation. This tool measures it instead:
 `probe` polls the live head and `firstAvailable` on an interval, `floor` asks
@@ -140,8 +170,9 @@ The recorded runs are in `fixtures/`, so both tables above rebuild from a clean
 checkout with no credentials and no network:
 
 ```bash
-cargo run --release -- report fixtures/devnet-1h.jsonl          # retention table
-cargo run --release -- report --attempts fixtures/floor.jsonl   # floor table
+cargo run --release -- report fixtures/devnet-1h.jsonl             # retention table
+cargo run --release -- report --attempts fixtures/floor.jsonl      # slot floor
+cargo run --release -- report --attempts fixtures/floor-tx.jsonl   # transaction floor
 ```
 
 `report` accepts any file either subcommand wrote, including one that was
