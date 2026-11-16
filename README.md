@@ -1,7 +1,10 @@
 # replayfloor
 
-A one-binary probe for a single question about Helius LaserStream: how much
+A one-binary tool for a single question about Helius LaserStream: how much
 history can you actually replay before the stream tells you the slot is gone?
+
+Measured on devnet: **864,149 slots**, and the floor is real, not just
+reported. That is 288 times the documented 3000.
 
 ## Result: one hour on devnet, 16 November 2026
 
@@ -35,6 +38,42 @@ constant distance behind the head instead of a constant age. A time based
 buffer would have looked the same over this span, so the shape line alone does
 not settle it; the depth being 288 times the documented figure does.
 
+## Verification: the floor is real, not just reported
+
+The number above comes from the server's own `firstAvailable`. A server can
+claim a floor it will not honour, so `floor` asks for old slots directly and
+watches where the stream actually starts. It grows the request 1.5x while slots
+serve, then bisects until the served and refused ages are 50 slots apart.
+
+| | |
+|---|---|
+| endpoint | https://laserstream-devnet-ewr.helius-rpc.com |
+| head at start | 523058130 |
+| claimed floor | 522193975 |
+| claimed depth | 864155 slots |
+| verified depth | 864149 slots (largest age served exactly) |
+| first failing age | 864184 slots (refused or silent) |
+| resolution | 50 slots (bisection tolerance) |
+| verdict | claim holds within the 50 slot resolution of the search |
+| attempts | 25 (0 silent, 0 clamped) |
+| attempt latency | 234 / 459 / 3806 ms (min / median / max) |
+
+Two details make that a stronger result than "data arrived":
+
+- Every served attempt returned an update at exactly the slot requested, not a
+  later one. A clamped stream, where the server quietly starts at its floor
+  regardless of what you asked for, would show as `Clamped` here and does not.
+- The refusal at 864,184 slots was an explicit gRPC `OutOfRange`, so the
+  endpoint tells you when you have asked for a slot it has purged. It is not a
+  silent drop.
+
+The first run of this command reported 863,833 slots as the floor with a
+verdict that the claim was optimistic. That attempt had failed with
+`Some resource has been exhausted: h2 protocol error`, a transport blip that
+the search had recorded as the boundary. Retries on a fresh connection, and an
+abort when transport keeps failing, are why the second run is trustworthy. A
+network error must never be allowed to look like the end of the replay window.
+
 ## The open question
 
 The LaserStream documentation says the replay buffer holds 3000 slots, about
@@ -44,9 +83,10 @@ The LaserStream documentation says the replay buffer holds 3000 slots, about
 to 48 hours than to 20 minutes at 2.5 slots per second. Two numbers cannot both
 be right.
 
-That example stopped at the observation. This probe measures it instead: it
-polls the live head and `firstAvailable` on an interval for an hour, writes raw
-samples, and turns them into one table.
+That example stopped at the observation. This tool measures it instead:
+`probe` polls the live head and `firstAvailable` on an interval, `floor` asks
+for old slots directly to check the reported floor, and `report` turns the
+samples into one table.
 
 ## What it measures
 
@@ -74,13 +114,19 @@ An hour long run has to survive timeouts, and a dead window is data too.
 
 ```bash
 cp .env.example .env    # set HELIUS_API_KEY
+
+# what does the endpoint claim, over time?
 cargo run --release -- probe --hours 1 --out devnet-1h.jsonl
 cargo run --release -- report devnet-1h.jsonl
+
+# does the claim hold, right now?
+cargo run --release -- floor --tolerance 50 --out floor.jsonl
 ```
 
 `--endpoint` takes a full URL or a bare region name such as `mainnet-ewr`.
-`--interval-secs` defaults to 60. `report` accepts any file the probe wrote,
-including one that was interrupted.
+`--interval-secs` defaults to 60. `--tolerance` is how close the bisection gets
+before it stops; 50 slots is about 12 seconds of devnet chain time. `report`
+accepts any file the probe wrote, including one that was interrupted.
 
 ## How to read the result
 
@@ -103,10 +149,12 @@ documented 3000. The limits below apply before generalising that to mainnet.
   not guaranteed to match mainnet.
 - One region, one hour. A single hour shows the depth is stable, not that it
   stays stable across a validator restart or a purge cycle longer than the run.
-- `firstAvailable` is reported by the server. If it lies, or if it only reflects
-  the last purge rather than an authoritative floor, this probe repeats the lie
-  rather than detecting it. Confirming it would mean asking for the oldest slot
-  by number and seeing whether the stream serves it.
+- `floor` checks the reported floor against what the stream serves, but only
+  for slots. It does not prove that transactions, blocks or account writes
+  survive to the same depth; those filters can have their own limits.
+- `floor` treats five seconds of silence at a given age as a refusal. A stream
+  that was merely slow would look the same, which is why every attempt records
+  its latency and why the retry exists.
 - Retention may be tier dependent. A Business or Professional key could see a
   different buffer than a free one.
 

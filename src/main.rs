@@ -1,3 +1,4 @@
+mod floor;
 mod probe;
 mod report;
 mod sample;
@@ -37,6 +38,8 @@ struct Cli {
 enum Command {
     /// Poll the live head and replay-info on an interval, appending to a JSONL file
     Probe(ProbeCli),
+    /// Ask the endpoint for progressively older slots and find the true floor
+    Floor(FloorCli),
     /// Summarise a JSONL file written by probe
     Report(ReportCli),
 }
@@ -88,6 +91,70 @@ impl ProbeCli {
 }
 
 #[derive(Parser)]
+struct FloorCli {
+    /// gRPC endpoint, for example https://laserstream-mainnet-ewr.helius-rpc.com
+    #[arg(long, env = "LASERSTREAM_ENDPOINT", default_value = DEFAULT_ENDPOINT)]
+    endpoint: String,
+
+    /// API key. Read from HELIUS_API_KEY when the flag is absent
+    #[arg(long, env = "HELIUS_API_KEY", hide_env_values = true)]
+    api_key: Option<String>,
+
+    /// Where attempts are appended, one JSON object per line
+    #[arg(long, default_value = "floor.jsonl")]
+    out: PathBuf,
+
+    /// Seconds to wait before calling an attempt a silent drop
+    #[arg(long, default_value_t = 5)]
+    wait_secs: u64,
+
+    /// Oldest age worth asking for, in slots
+    #[arg(long, default_value_t = 2_000_000)]
+    max_age: u64,
+
+    /// Stop bisecting once the served and refused ages are this close
+    #[arg(long, default_value_t = 1000)]
+    tolerance: u64,
+
+    /// Slot offset above which an answer counts as clamped rather than served
+    #[arg(long, default_value_t = 200)]
+    clamp_tolerance: u64,
+
+    /// Hard cap on attempts, so a hostile endpoint cannot loop forever
+    #[arg(long, default_value_t = 40)]
+    max_attempts: usize,
+
+    /// Retries for a transient transport failure before calling the run inconclusive
+    #[arg(long, default_value_t = 3)]
+    retries: usize,
+}
+
+impl FloorCli {
+    fn into_args(self) -> Result<floor::FloorArgs> {
+        let Some(api_key) = self.api_key else {
+            bail!("no API key: pass --api-key or set HELIUS_API_KEY");
+        };
+        if self.wait_secs == 0 {
+            bail!("--wait-secs must be at least 1");
+        }
+        if self.tolerance == 0 {
+            bail!("--tolerance must be at least 1 slot, or the search cannot stop");
+        }
+        Ok(floor::FloorArgs {
+            endpoint: resolve_endpoint(&self.endpoint),
+            api_key,
+            out: self.out,
+            wait: Duration::from_secs(self.wait_secs),
+            max_age: self.max_age,
+            tolerance: self.tolerance,
+            clamp_tolerance: self.clamp_tolerance,
+            max_attempts: self.max_attempts,
+            retries: self.retries,
+        })
+    }
+}
+
+#[derive(Parser)]
 struct ReportCli {
     /// JSONL file written by probe
     file: PathBuf,
@@ -113,6 +180,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Command::Floor(args) => floor::run(args.into_args()?).await,
         Command::Report(args) => {
             let samples = sample::read_all(&args.file)
                 .with_context(|| format!("reading {}", args.file.display()))?;

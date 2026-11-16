@@ -42,9 +42,9 @@ impl Sample {
     }
 }
 
-/// Appends one sample to the JSONL file, creating the file if needed.
-pub fn append(path: &Path, sample: &Sample) -> Result<()> {
-    let line = serde_json::to_string(sample).context("serialising sample")?;
+/// Appends one record to the JSONL file, creating the file if needed.
+pub fn append<T: Serialize>(path: &Path, record: &T) -> Result<()> {
+    let line = serde_json::to_string(record).context("serialising record")?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -104,6 +104,7 @@ mod tests {
 
     #[test]
     fn jsonl_round_trips() {
+        // Appending is generic, so the same path serves samples and attempts.
         let dir = std::env::temp_dir().join(format!("replayfloor-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("s.jsonl");

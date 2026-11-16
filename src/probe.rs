@@ -29,7 +29,7 @@ fn host_of(endpoint: &str) -> &str {
     rest.split('/').next().unwrap_or(rest)
 }
 
-async fn connect(endpoint: &str, api_key: &str) -> Result<GeyserGrpcClient> {
+pub(crate) async fn connect(endpoint: &str, api_key: &str) -> Result<GeyserGrpcClient> {
     let mut builder =
         GeyserGrpcClient::build_from_shared(endpoint.to_string())?.x_token(Some(api_key))?;
 
@@ -50,7 +50,7 @@ async fn connect(endpoint: &str, api_key: &str) -> Result<GeyserGrpcClient> {
 }
 
 /// A single hung call must not stall the loop, so every call is capped.
-const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One head plus replay-info pair.
 ///
